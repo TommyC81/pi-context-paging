@@ -21,7 +21,8 @@ const hasMarker = (messages: readonly any[], value: string) => messages.some((me
 	const text = typeof message.content === "string"
 		? message.content
 		: message.content?.map((block: any) => block.text ?? "").join("") ?? "";
-	return text.includes(value);
+	// Retention checks ignore the generated notice, which may quote evicted conversation.
+	return !text.startsWith("[Context paging notice") && text.includes(value);
 });
 
 function observedSessionFixture(input: {

@@ -108,7 +108,8 @@ const selected = (
 const marker = (message: any): string => typeof message.content === "string"
 	? message.content
 	: message.content?.map((block: any) => block.text ?? "").join("") ?? message.summary ?? "";
-const hasMarker = (messages: readonly object[], value: string) => messages.some((message) => marker(message).includes(value));
+// Retention checks ignore the generated notice, which may quote evicted conversation.
+const hasMarker = (messages: readonly object[], value: string) => messages.some((message) => !marker(message).startsWith("[Context paging notice") && marker(message).includes(value));
 const rolesAndMarkers = (messages: readonly any[]) => messages.map((message) => [message.role, marker(message)]);
 const repeat = (markerText: string, length: number) => `${markerText} ${"x".repeat(length)}`;
 
@@ -519,7 +520,7 @@ test("adds one counted paging notice before retained canonical messages and can 
 		assistant(repeat("first old answer", 1_000)),
 		user(repeat("second old request", 20)),
 		assistant(repeat("second old answer", 20)),
-		user(repeat("active request", 255_600)),
+		user(repeat("active request", 255_400)),
 	];
 	const selection = selected(messages, {
 		modelContextWindow: 64_000,
@@ -811,12 +812,14 @@ test("matches same-timestamp fallback candidates exactly and serializes each onc
 		});
 		return message;
 	};
+	// The newest evicted request; its near collision has the same timestamp and sequence.
+	const lastEvicted = 41;
 	const oldMessages = Array.from({ length: 80 }, (_, index) => ({
 		request: repeat(`OLD_REQUEST_${index}`, 6_000),
 	}));
 	const rawHistoryItems: HistoryItem[] = oldMessages.flatMap(({ request }, index) => {
 		const items: HistoryItem[] = [];
-		if (index === 37) {
+		if (index === lastEvicted) {
 			items.push({
 				id: "near-collision",
 				kind: "user",
@@ -842,7 +845,9 @@ test("matches same-timestamp fallback candidates exactly and serializes each onc
 	const selection = selected(messages, { modelContextWindow: 100_000, rawHistoryItems });
 
 	assert.equal(selection.mode, "paged");
-	assert.match(marker(selection.messages[0]), /Recent evicted historyId: "old-user-37"\./);
+	assert.match(marker(selection.messages[0]), new RegExp(`Recent evicted historyId: "old-user-${lastEvicted}"\\.`));
+	assert.equal(hasMarker(selection.messages, `OLD_REQUEST_${lastEvicted + 1} `), true);
+	assert.equal(marker(selection.messages[0]).includes("near-collision"), false);
 	for (const item of rawHistoryItems) {
 		assert.equal(serializations.get(item.id), 1, `${item.id} should serialize once`);
 	}

@@ -5,7 +5,10 @@ import { ContextSelectionError, selectContext } from "../src/context-policy.ts";
 import { appendExchange, completeTurn, fixtureFromEntries, pagingFixture } from "./fixtures/context-cut.ts";
 
 const text = (messages: readonly object[]) => JSON.stringify(messages);
-const has = (messages: readonly object[], marker: string) => text(messages).includes(marker);
+const isPagingNotice = (message: any) => typeof message.content === "string" && message.content.startsWith("[Context paging notice");
+// Retention checks ignore the generated notice, which may quote evicted conversation.
+const has = (messages: readonly object[], marker: string) => text(messages.filter((message) => !isPagingNotice(message))).includes(marker);
+const hasNotice = (messages: readonly object[]) => messages.some(isPagingNotice);
 const invalidStructure = (error: unknown) => error instanceof ContextSelectionError && error.code === "INVALID_MESSAGE_STRUCTURE";
 
 test("holds a cut and byte-identical notice below the retained budget", () => {
@@ -54,7 +57,7 @@ test("exactly at budget does not advance", () => {
 	assert.equal(result.cutState, undefined);
 	assert.equal(result.mode, "within-budget");
 	assert.deepEqual(result.messages, f.input.messages);
-	assert.equal(has(result.messages, "Context paging notice"), false);
+	assert.equal(hasNotice(result.messages), false);
 });
 
 test("retained over-budget estimate advances FIFO", () => {

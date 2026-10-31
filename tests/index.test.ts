@@ -59,7 +59,10 @@ const branchFor = (reason: string) => [entry(`user-${reason}`, user(reason))];
 const marker = (message: any) => typeof message.content === "string"
 	? message.content
 	: message.content?.map((block: any) => block.text ?? "").join("") ?? "";
-const hasMarker = (messages: readonly object[], value: string) => messages.some((message) => marker(message).includes(value));
+const isPagingNotice = (message: object) => marker(message).startsWith("[Context paging notice");
+// Retention checks ignore the generated notice, which may quote evicted conversation.
+const hasMarker = (messages: readonly object[], value: string) => messages.some((message) => !isPagingNotice(message) && marker(message).includes(value));
+const hasNotice = (messages: readonly object[]) => messages.some(isPagingNotice);
 const statusTokens = (usage: number, suffix: readonly object[]) =>
 	usage + suffix.reduce((sum, message) => sum + estimateTokens(message as any), 0);
 
@@ -503,15 +506,15 @@ test("uses measured anchors across repeated paged requests with a protected tool
 
 test("uses outgoing-only provenance for measured anchors and clears it after projection failure", async () => {
 	const harness = createHarness({
-		globalSettings: { contextPaging: { enabled: true, tokenBudget: 110 } },
+		globalSettings: { contextPaging: { enabled: true, tokenBudget: 220 } },
 		projectTrusted: false,
 	});
-	const actual = user(`ACTUAL_REQUEST ${"x".repeat(150)}`);
+	const actual = user(`ACTUAL_REQUEST ${"x".repeat(300)}`);
 	const injected = user("outgoing extension instruction");
 	harness.setBranch([entry("actual", actual)]);
 	assert.equal(hasMarker((await emit(harness, "context", { messages: [actual, injected] }) as any).messages, "ACTUAL_REQUEST"), true);
 
-	const response = assistant("MODEL_RESPONSE ".repeat(20), { totalTokens: 51 });
+	const response = assistant("MODEL_RESPONSE ".repeat(40), { totalTokens: 51 });
 	harness.setBranch([entry("actual", actual), entry("response", response)]);
 	await emit(harness, "turn_end", { message: response });
 	const next = user("NEXT_REQUEST");
@@ -550,7 +553,7 @@ test("counts a persisted system/tool update once at the measured threshold for b
 		assert.deepEqual(selected.messages, messages, `111-token request fits without paging (system metadata: ${includeSystem})`);
 		assert.equal(hasMarker(selected.messages, "ACTUAL_REQUEST"), true);
 		assert.equal(hasMarker(selected.messages, "next"), true);
-		assert.equal(hasMarker(selected.messages, "Context paging notice"), false);
+		assert.equal(hasNotice(selected.messages), false);
 		assert.equal(harness.abortCalls(), 0);
 	}
 });
@@ -558,12 +561,12 @@ test("counts a persisted system/tool update once at the measured threshold for b
 test("resumes measured accounting from projected compaction and context-edit messages", async () => {
 	for (const type of ["compaction", "context_edit"] as const) {
 		const harness = createHarness({
-			globalSettings: { contextPaging: { enabled: true, tokenBudget: 110 } },
+			globalSettings: { contextPaging: { enabled: true, tokenBudget: 220 } },
 			projectTrusted: false,
 		});
-		const replaced = user(`REPLACED_${type} ${"x".repeat(1_000)}`);
-		const summary = user(`PROJECTED_${type} ${"x".repeat(200)}`);
-		const response = assistant(`RESPONSE_${type} ${"y".repeat(300)}`, { totalTokens: 50 });
+		const replaced = user(`REPLACED_${type} ${"x".repeat(2_000)}`);
+		const summary = user(`PROJECTED_${type} ${"x".repeat(400)}`);
+		const response = assistant(`RESPONSE_${type} ${"y".repeat(600)}`, { totalTokens: 50 });
 		const next = user(`NEXT_${type}`);
 		harness.setBranch([
 			entry("replaced", replaced),
@@ -609,11 +612,11 @@ test("clears independently re-established measured accounting for lifecycle chan
 
 	for (const [name, invalidate] of invalidators) {
 		const harness = createHarness({
-			globalSettings: { contextPaging: { enabled: true, tokenBudget: 110 } },
+			globalSettings: { contextPaging: { enabled: true, tokenBudget: 220 } },
 			projectTrusted: false,
 		});
-		const anchored = user(`ANCHOR_${name} ${"x".repeat(180)}`);
-		const response = assistant(`RESPONSE_${name} ${"y".repeat(150)}`, { totalTokens: 50 });
+		const anchored = user(`ANCHOR_${name} ${"x".repeat(480)}`);
+		const response = assistant(`RESPONSE_${name} ${"y".repeat(400)}`, { totalTokens: 50 });
 		const next = user(`NEXT_${name}`);
 		harness.setBranch([entry("anchored", anchored)]);
 		await emit(harness, "context", { messages: [anchored] });
@@ -757,7 +760,7 @@ test("does not mutate stored history and generates transient notices", async () 
 	assert.equal(second.messages.filter((message: any) => marker(message).includes("Context paging notice")).length, 1);
 	assert.match(marker(first.messages[0]), /Older context left the 32,000-token rolling window\./);
 	assert.match(marker(second.messages[0]), /Older context left the 32,000-token rolling window\./);
-	assert.equal(hasMarker(harness.branch().map((item: any) => item.message), "Context paging notice"), false);
+	assert.equal(hasNotice(harness.branch().map((item: any) => item.message)), false);
 });
 
 test("cancels only automatic compaction and leaves disabled paging inert", async () => {
@@ -849,7 +852,7 @@ test("context-paging preserves a cut for status and repeated on but resets it ac
 	await runPagingCommand(harness, "on");
 	const restored = await emit(harness, "context", { messages }) as any;
 	assert.equal(hasMarker(restored.messages, "RESET_A request"), true);
-	assert.equal(hasMarker(restored.messages, "Context paging notice"), false);
+	assert.equal(hasNotice(restored.messages), false);
 });
 
 test("context-paging resets its override at every session start", async () => {
@@ -1045,7 +1048,7 @@ for (const [name, event] of [
 		await emit(harness, name, event);
 		const next = await emit(harness, "context", { messages: structuredClone(messages) }) as any;
 		assert.equal(hasMarker(next.messages, "RESET_A request"), true);
-		assert.equal(hasMarker(next.messages, "Context paging notice"), false);
+		assert.equal(hasNotice(next.messages), false);
 		assert.equal(harness.abortCalls(), 0);
 	});
 }
@@ -1081,7 +1084,7 @@ test("a fresh extension has no prior frontier", async (t) => {
 	fresh.harness.ctx.getSystemPrompt = () => "system";
 	const restarted = await emit(fresh.harness, "context", { messages: fresh.messages }) as any;
 	assert.equal(hasMarker(restarted.messages, "RESET_A request"), true);
-	assert.equal(hasMarker(restarted.messages, "Context paging notice"), false);
+	assert.equal(hasNotice(restarted.messages), false);
 });
 
 for (const type of ["context_edit", "compaction"] as const) {

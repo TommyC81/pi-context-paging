@@ -20,6 +20,7 @@ const expectedFiles = [
   "src/index.ts",
   "src/navigator.ts",
   "src/output-pages.ts",
+  "src/paging-notice.ts",
   "src/recovery-content.ts",
   "src/recovery-loads.ts",
   "src/recovery-parts.ts",

@@ -6,6 +6,9 @@ import { HistoryNavigator } from "../src/navigator.ts";
 const TURN_COUNT = 300;
 const TOOL_OUTPUT_BYTES = 15 * 1024 * 1024;
 const TOKEN_BUDGET = 128_000;
+// Many short completed turns: a first cut evicts thousands of turns and rebuilds the notice for each one.
+const SHORT_TURN_COUNT = 10_000;
+const SHORT_TURN_BUDGET = 200_000;
 
 type BenchmarkMeasurement<T> = {
 	milliseconds: number;
@@ -80,6 +83,37 @@ function sessionHistory() {
 	return entries;
 }
 
+function shortTurnHistory() {
+	const entries: object[] = [];
+	for (let turn = 0; turn < SHORT_TURN_COUNT; turn++) {
+		const timestamp = turn * 2;
+		entries.push(
+			{
+				type: "message",
+				id: `short-user-${turn}`,
+				parentId: null,
+				timestamp: new Date(timestamp).toISOString(),
+				message: { role: "user", content: `Short request ${turn} ${"u".repeat(100)}`, timestamp },
+			},
+			{
+				type: "message",
+				id: `short-reply-${turn}`,
+				parentId: null,
+				timestamp: new Date(timestamp + 1).toISOString(),
+				message: { role: "assistant", content: [{ type: "text", text: `Short reply ${turn} ${"r".repeat(500)}` }], stopReason: "stop", timestamp: timestamp + 1 },
+			},
+		);
+	}
+	entries.push({
+		type: "message",
+		id: "short-active-request",
+		parentId: null,
+		timestamp: new Date(SHORT_TURN_COUNT * 2).toISOString(),
+		message: { role: "user", content: "Continue.", timestamp: SHORT_TURN_COUNT * 2 },
+	});
+	return entries;
+}
+
 function formatMilliseconds(milliseconds: number): string {
 	return `${milliseconds.toFixed(2)} ms`;
 }
@@ -95,6 +129,16 @@ const selection = measure(() => selectContext({
 	tokenBudget: TOKEN_BUDGET,
 	rawHistoryItems: projection.value,
 }));
+const shortEntries = shortTurnHistory();
+const shortProjection = projectActiveBranch(shortEntries as any);
+const shortSelection = measure(() => selectContext({
+	messages: shortEntries.map((entry: any) => entry.message),
+	systemPrompt: "You are a benchmark assistant.",
+	activeTools: [],
+	modelContextWindow: SHORT_TURN_BUDGET,
+	tokenBudget: SHORT_TURN_BUDGET,
+	rawHistoryItems: shortProjection,
+}));
 const rebuild = measure(() => new HistoryNavigator(projection.value));
 const firstSearch = measure(() => rebuild.value.search({ query: "needle", limit: 5 }));
 const cachedSearch = measure(() => rebuild.value.search({ query: "needle", limit: 5 }));
@@ -102,6 +146,7 @@ const cachedSearch = measure(() => rebuild.value.search({ query: "needle", limit
 console.log(`workload: turns=${TURN_COUNT} entries=${entries.length} historyItems=${projection.value.length} toolOutputBytes=${TOOL_OUTPUT_BYTES}`);
 console.log(`raw projection: ${formatMilliseconds(projection.milliseconds)}`);
 console.log(`selectContext: ${formatMilliseconds(selection.milliseconds)} mode=${selection.value.mode} estimatedTokens=${selection.value.estimatedTokens} budgetTokens=${selection.value.budgetTokens} retainedMessages=${selection.value.messages.length}`);
+console.log(`selectContext short turns: ${formatMilliseconds(shortSelection.milliseconds)} turns=${SHORT_TURN_COUNT} mode=${shortSelection.value.mode} estimatedTokens=${shortSelection.value.estimatedTokens} budgetTokens=${shortSelection.value.budgetTokens} retainedMessages=${shortSelection.value.messages.length}`);
 console.log(`navigator rebuild: ${formatMilliseconds(rebuild.milliseconds)}`);
 console.log(`navigator first search: ${formatMilliseconds(firstSearch.milliseconds)} results=${firstSearch.value.length}`);
 console.log(`navigator cached search: ${formatMilliseconds(cachedSearch.milliseconds)} results=${cachedSearch.value.length}`);
