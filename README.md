@@ -75,13 +75,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.3.10
+pi install npm:@rochecompaan/pi-context-paging@0.3.11
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.3.10
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.11
 ```
 
 After installation, restart Pi.
@@ -411,6 +411,16 @@ A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
 
+## Changes in 0.3.11
+
+- `load_history`, and `search_history` with `load: true`, return items whole, smallest first, while they fit the 16 KiB reply. Before, every item over 4 KiB came back as parts.
+- `read_context_output` text mode returns a JSON header block, then the page as a second block. Strings and text blocks with only `type` and `text` read as plain text without JSON escaping. Other parts read as exact JSON.
+- Pages fill the 16 KiB reply instead of stopping at 2,000 characters. While text remains, the header has `next`, the exact arguments for the next read. `limit` is optional, up to 16,384.
+- Without `contentIndex` or `toolCallId`, the `source` selectors read the only matching public block or tool result. Ambiguous selectors and unknown parts give errors that list the public choices.
+- `historyId` can have at most 128 characters and `part` at most 512, because every page header repeats them.
+- Recovery replies leave `details` empty. Everything is in `content`.
+- Recovery handles in the paging notice no longer set `offset` and `limit`.
+
 ## Changes in 0.3.10
 
 - The paging notice copies the removed conversation from the stored session: each removed user message and the final reply of the 3 newest removed turns. This is copied text, not a summary. A clipped entry names the part that holds the full text.
@@ -584,7 +594,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.3.10
+pi remove npm:@rochecompaan/pi-context-paging@0.3.11
 ```
 
 ## License
