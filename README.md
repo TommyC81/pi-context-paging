@@ -52,7 +52,7 @@ The extension works like this:
 - Pi stores the full session history on disk. The extension never changes this history.
 - The extension sends the model only the most recent history that fits in the token budget. This part is the rolling window.
 - When a request is larger than the budget, the extension removes the oldest history from the window. That history stays in the stored session.
-- The model gets a short paging notice at the start of the window. The notice says that older context left the window, and how to get it back.
+- The model gets a paging notice at the start of the window. The notice says that older context left the window, and how to get it back. It also copies the removed user messages and the newest removed replies.
 - The model has four recovery tools. They search, browse, and load the older history as exact text.
 
 This is better than compaction or handoff for these reasons:
@@ -65,8 +65,9 @@ This is better than compaction or handoff for these reasons:
 - **There is no surprise compaction.** The extension cancels automatic compaction while it is enabled. You can still compact by hand.
 
 One behavior is different from compaction.
-The model does not see older history until it asks for it.
-The paging notice tells the model that older context exists and how to load it.
+The model does not see most older history until it asks for it.
+The paging notice copies the removed user messages and the newest removed replies. It does not summarize them.
+The notice also tells the model how to load the rest.
 The model decides when to search.
 
 ## Install
@@ -74,13 +75,13 @@ The model decides when to search.
 From npm:
 
 ```sh
-pi install npm:@rochecompaan/pi-context-paging@0.3.9
+pi install npm:@rochecompaan/pi-context-paging@0.3.10
 ```
 
 From the GitHub release tag:
 
 ```sh
-pi install git:github.com/rochecompaan/pi-context-paging@v0.3.9
+pi install git:github.com/rochecompaan/pi-context-paging@v0.3.10
 ```
 
 After installation, restart Pi.
@@ -227,6 +228,7 @@ The `files` filter requires every listed file.
 With `load: true`, `search_history` returns all requested `references` and loads at most three `items`.
 The `unloadedHistoryIds` array lists the other matches in search order.
 Use `load_history` to load those IDs, at most three per call.
+
 ### Reply limits and large items
 
 Every text reply has a 16 KiB limit, measured as serialized UTF-8 bytes.
@@ -324,6 +326,27 @@ The extension reuses the same cut point and the same notice until the request ex
 A request that is equal to the budget, or between the target and the budget, does not move the cut point.
 A lower estimate never brings removed history back.
 
+**The paging notice.** The notice says that this is context paging, not compaction, and that nothing was summarized.
+It tells the model to continue the current task.
+It gives the most recent removed history ID and a handle for the last removed tool output.
+
+The notice also copies the removed conversation from the stored session.
+It shows each removed user message and the final reply of the 3 newest removed turns.
+The final reply is the last assistant message in the turn with public text. Thinking and tool calls stay out.
+Turns that are only partly removed add nothing, because their request stays in the window.
+Each entry shows its history ID.
+An entry longer than 6,000 characters (UTF-16 code units) is clipped. The clipped entry names the `read_context_output` part with the full text.
+
+The copied conversation is at most 32,000 characters, or 10% of the budget at 4 characters per token if that is smaller.
+It also fits in the room that is left when every removable turn is gone.
+A request that fits with the plain notice therefore never fails because of the copied conversation.
+When user messages do not fit, the notice counts them and says how to find them.
+If the stored history cannot be read, the notice has no copied conversation.
+
+One case changes the notice without a new cut.
+If a later request exceeds the budget and no removable history is left, the extension shrinks the copied conversation before it reports an error.
+It keeps the smaller notice until the next cut.
+
 **Why the cut point is stable.** The same cut point means that each request starts with the same messages as the last one.
 This keeps the provider prompt cache useful between cuts.
 The guarantee holds for ordinary append-only history with stable resident input.
@@ -372,6 +395,16 @@ Manual compaction remains available.
 A successful manual compaction resets the cut point.
 
 Read [the architecture document](docs/architecture.md) for module and lifecycle details.
+
+## Changes in 0.3.10
+
+- The paging notice copies the removed conversation from the stored session: each removed user message and the final reply of the 3 newest removed turns. This is copied text, not a summary. A clipped entry names the part that holds the full text.
+- The notice says that paging is not compaction, and tells the model to continue the current task.
+- The copied conversation uses only the room left when every removable turn is gone, so it never makes a request fail that fits with the plain notice. A remembered notice shrinks when a later request leaves no history to remove.
+- Every recovery reply has a 16 KiB limit. Large items return part handles that `read_context_output` reads exactly. Images return metadata and at most one native attachment per request, not base64 text.
+- The four recovery tools exclude their own calls and results from search, browse, load, output pages, and notices. This includes wrappers such as `codemode` that called only paging tools.
+- The `search_history` `tools` filter matches any listed tool.
+- Text-query search previews show an excerpt around the first matching term.
 
 ## Changes in 0.3.9
 
@@ -536,7 +569,7 @@ pi update --extensions
 Remove the package:
 
 ```sh
-pi remove npm:@rochecompaan/pi-context-paging@0.3.9
+pi remove npm:@rochecompaan/pi-context-paging@0.3.10
 ```
 
 ## License

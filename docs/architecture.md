@@ -204,8 +204,18 @@ The notice reports the effective budget and gives stable recovery references.
 References identify recoverable evicted items and ordinary tool results, not excluded paging activity.
 When no evicted item is recoverable, the notice omits specific handles.
 The raw eviction boundary remains independent of these references.
-Normal selection reuses its exact content and timestamp until a frontier advance or reset changes its references.
+Normal selection reuses its exact content and timestamp until a frontier advance or reset changes its references, or a resize changes its copied conversation.
 The notice contributes to both the budget trigger and the cut destination. It is not written into stored session history.
+
+`paging-notice.ts` builds the notice text and its copied conversation.
+The notice copies each evicted user message and the final public-text reply of the newest 3 evicted turns, with their history IDs.
+Turns evicted at earlier cuts come from completed turns whose request the retained view no longer holds.
+Partial-turn and prefix evictions add nothing, because their request stays in context. Without raw history provenance, the notice has no conversation section.
+The section fits the smallest of 32,000 code units, 10% of the effective budget at 4 characters per token, and the room left once every evictable unit is gone.
+Entries are chosen newest first and shown oldest first. Each entry is clipped to 6,000 code units and names the exact part that holds the full text.
+The selector rebuilds the notice only when the evicted record or recovery key changes, and it does not cache rebuilt notices.
+When a remembered cut leaves nothing to evict and its frozen notice no longer fits, the selector resizes the copied conversation before it rejects the request.
+The cut state keeps the resized notice until the frontier advances.
 
 For append-only history and stable resident input, ordinary requests preserve the previous outgoing request as a prefix between advances.
 This guarantee includes the completion of a partial turn. It excludes other extensions' message edits and non-append input changes.

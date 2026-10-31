@@ -1,6 +1,6 @@
 {
   "name": "@rochecompaan/pi-context-paging",
-  "version": "0.3.9",
+  "version": "0.3.10",
   "description": "Bounded rolling context and exact history recovery for Pi",
   "private": false,
   "license": "MIT",
