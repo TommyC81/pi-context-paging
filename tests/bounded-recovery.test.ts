@@ -27,19 +27,23 @@ function registered(items: HistoryItem[]) {
 }
 function bounded(reply: any) {
 	assert.ok(Buffer.byteLength(JSON.stringify(reply), "utf8") <= 16_384, "complete reply exceeds 16 KiB");
-	assert.deepEqual(JSON.parse(reply.content[0].text), reply.details);
-	return reply.details;
+	assert.equal(reply.details, undefined);
+	return JSON.parse(reply.content[0].text);
+}
+/** A text page is a JSON header block followed by an unescaped body block. */
+function page(reply: any): { header: any; text: string } {
+	return { header: bounded(reply), text: reply.content[1]?.text ?? "" };
 }
 async function collectText(execute: ReturnType<typeof registered>, handle: Record<string, unknown>): Promise<string> {
 	let offset = 0;
 	let text = "";
 	for (let pages = 0; pages < 500; pages++) {
-		const page = bounded(await execute("read_context_output", { ...handle, offset }));
-		assert.equal(page.offset, offset);
-		text += page.text;
-		if (page.nextOffset === null) { assert.equal(text.length, page.totalCharacters); return text; }
-		assert.ok(page.nextOffset > offset, "cursor must advance");
-		offset = page.nextOffset;
+		const { header, text: body } = page(await execute("read_context_output", { ...handle, offset }));
+		assert.equal(header.offset, offset);
+		text += body;
+		if (header.nextOffset === null) { assert.equal(text.length, header.totalCharacters); return text; }
+		assert.ok(header.nextOffset > offset, "cursor must advance");
+		offset = header.nextOffset;
 	}
 	assert.fail("too many pages");
 }
@@ -55,7 +59,7 @@ for (const [label, text] of [["ASCII", "large ".repeat(8_000)], ["Unicode", "ðŸ˜
 		assert.equal(loaded.deferred, true);
 		const part = loaded.parts.find((part: any) => part.part === "/userMessage/content");
 		assert.ok(part?.read);
-		assert.equal(JSON.parse(await collectText(execute, part.read)), text);
+		assert.equal(await collectText(execute, part.read), text);
 		assert.deepEqual(items, before);
 	});
 }
@@ -68,13 +72,8 @@ test("a huge first item does not prevent a later small item from loading", async
 	assert.deepEqual(payload.items[1], { ...items[1], sequence: 1 });
 });
 
-test("a part over 4 KiB is deferred even when it fits the total reply limit", async () => {
-	const payload = bounded(await registered([user("u", "a".repeat(4_200))])("load_history", { historyIds: ["u"] }));
-	assert.equal(payload.items[0].deferred, true);
-});
-
 test("multiple near-limit items share one complete reply budget and all remain retrievable", async () => {
-	const items = [user("a", "a".repeat(3_500)), user("b", "b".repeat(3_500)), user("c", "c".repeat(3_500))];
+	const items = [user("a", "a".repeat(7_000)), user("b", "b".repeat(7_000)), user("c", "c".repeat(7_000))];
 	const execute = registered(items);
 	const payload = bounded(await execute("load_history", { historyIds: ["a", "b", "c"] }));
 	assert.deepEqual(payload.items.map((item: any) => item.id), ["a", "b", "c"]);
@@ -161,20 +160,20 @@ test("large part lists page without losing any public block", async () => {
 	for (let i = 0; i < 160; i++) assert.ok(pointers.includes(`/assistantMessage/content/${i}`));
 });
 
-test("Unicode page cursors never split a surrogate pair and preserve exact JSON", async () => {
+test("Unicode page cursors never split a surrogate pair and preserve exact text", async () => {
 	const item = user("u", "ðŸ˜€".repeat(3_000));
 	const execute = registered([item]);
 	const handle = { historyId: "u", part: "/userMessage/content", limit: 101 };
 	let offset = 0;
 	let text = "";
 	do {
-		const page = bounded(await execute("read_context_output", { ...handle, offset }));
-		assert.ok(!/[\uD800-\uDBFF]$/u.test(page.text));
-		text += page.text;
-		if (page.nextOffset === null) break;
-		offset = page.nextOffset;
+		const { header, text: body } = page(await execute("read_context_output", { ...handle, offset }));
+		assert.ok(!/[\uD800-\uDBFF]$/u.test(body));
+		text += body;
+		if (header.nextOffset === null) break;
+		offset = header.nextOffset;
 	} while (true);
-	assert.equal(JSON.parse(text), item.userMessage.content);
+	assert.equal(text, item.userMessage.content);
 });
 
 for (const source of ["user", "toolResult"] as const) {
@@ -194,8 +193,9 @@ for (const source of ["user", "toolResult"] as const) {
 		const attachment = await execute("read_context_output", descriptor.read);
 		assert.deepEqual(attachment.content.filter((part: any) => part.type === "image"), [image]);
 		assert.ok(Buffer.byteLength(JSON.stringify(attachment), "utf8") > 16_384, "image attachment is exempt from the text cap");
-		assert.doesNotMatch(JSON.stringify(attachment.details), new RegExp(data.slice(0, 200)));
-		const textReply = bounded(await execute("read_context_output", { ...descriptor.read, mode: "text" }));
+		assert.equal(attachment.details, undefined);
+		assert.doesNotMatch(JSON.stringify(attachment.content.filter((part: any) => part.type === "text")), new RegExp(data.slice(0, 200)));
+		const textReply = page(await execute("read_context_output", { ...descriptor.read, mode: "text" }));
 		assert.doesNotMatch(textReply.text, /"data"/);
 		if (source === "toolResult") {
 			const text = await collectText(execute, { historyId: item.id, source: "toolResult", toolCallId: "image-call" });

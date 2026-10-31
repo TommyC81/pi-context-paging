@@ -352,8 +352,6 @@ function recoveredProtectedExchange(exchange: ToolExchange, history: SelectionHi
 				historyId: reference.historyId,
 				source: "toolResult",
 				toolCallId: reference.toolCallId,
-				offset: 0,
-				limit: 2000,
 			})}).`,
 		].join("\n");
 		return { ...result, content: [{ type: "text" as const, text: content }] };

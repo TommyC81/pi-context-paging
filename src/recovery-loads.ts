@@ -1,7 +1,7 @@
 import type { RecoveryHistoryItem } from "./recovery-content.ts";
 import type { HistoryReference } from "./navigator.ts";
 import { describeHistoryPart, historyParts, isRecoveryImage, serializeRecoveryPart, type HistoryPartDescription } from "./recovery-parts.ts";
-import { fitsRecoveryResponse, MAXIMUM_INLINE_PART_BYTES, recoveryResponse } from "./recovery-response.ts";
+import { fitsRecoveryResponse, MAXIMUM_INLINE_PART_BYTES, MAXIMUM_PAGE_LIMIT, recoveryResponse } from "./recovery-response.ts";
 
 type DeferredItem = {
 	id: string;
@@ -47,11 +47,10 @@ export function boundedHistoryReply(items?: readonly RecoveryHistoryItem[], refe
 	}
 	if (!fitsRecoveryResponse(payload)) return recoveryResponse(payload);
 
-	// A large first item cannot consume the budget needed by a later small item.
-	for (const [index, item] of (items ?? []).entries()) {
-		if (containsImage(item)) continue;
-		const text = serializeRecoveryPart(item, "");
-		if (Buffer.byteLength(text, "utf8") > MAXIMUM_INLINE_PART_BYTES) continue;
+	// Smallest first, so a large first item cannot consume the budget needed by a later small item.
+	const candidates = (items ?? []).flatMap((item, index) => containsImage(item) ? []
+		: [{ item, index, bytes: Buffer.byteLength(serializeRecoveryPart(item, ""), "utf8") }]);
+	for (const { item, index } of candidates.sort((a, b) => a.bytes - b.bytes)) {
 		const deferred = loaded[index];
 		loaded[index] = item;
 		if (!fitsRecoveryResponse(payload)) loaded[index] = deferred;
@@ -76,10 +75,11 @@ export function boundedHistoryReply(items?: readonly RecoveryHistoryItem[], refe
 	return recoveryResponse(payload);
 }
 
-export function historyPartsPage(item: RecoveryHistoryItem, offset = 0, limit = 2_000) {
+/** The reply budget cuts each page; limit only caps the description count. */
+export function historyPartsPage(item: RecoveryHistoryItem, offset = 0, limit = MAXIMUM_PAGE_LIMIT) {
 	const parts = historyParts(item);
 	if (!Number.isSafeInteger(offset) || offset < 0 || offset > parts.length) throw new Error("Invalid part-list offset.");
-	if (!Number.isSafeInteger(limit) || limit < 1 || limit > 2_000) throw new Error("Invalid part-list limit.");
+	if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAXIMUM_PAGE_LIMIT) throw new Error("Invalid part-list limit.");
 	const page = { parts: [] as HistoryPartDescription[], offset, nextOffset: offset < parts.length ? offset as number | null : null, totalParts: parts.length };
 	for (let index = offset; index < parts.length && page.parts.length < limit; index++) {
 		page.parts.push(describeHistoryPart(item, parts[index]));

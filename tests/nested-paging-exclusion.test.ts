@@ -71,7 +71,7 @@ for (const name of PAGING_TOOL_NAMES) {
 			["browse_history", { direction: "forward" }],
 		] as const) {
 			const reply = await execute(tool, params);
-			assert.deepEqual(reply.details.references, []);
+			assert.deepEqual(JSON.parse((reply.content[0] as { text: string }).text).references, []);
 			assert.doesNotMatch(JSON.stringify(reply), /hidden-wrapper/);
 		}
 		await assert.rejects(() => execute("load_history", { historyIds: ["wrapper-turn"] }), /Unknown history ID/);

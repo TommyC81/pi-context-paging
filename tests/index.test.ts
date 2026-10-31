@@ -143,7 +143,7 @@ async function runPagingCommand(harness: ReturnType<typeof createHarness>, args:
 async function searchIds(harness: ReturnType<typeof createHarness>, query: string) {
 	const search = harness.tools.find((tool) => tool.name === "search_history");
 	const response = await search.execute("call", { query }, undefined, undefined, harness.ctx);
-	return response.details.references.map((reference: { historyId: string }) => reference.historyId);
+	return JSON.parse(response.content[0].text).references.map((reference: { historyId: string }) => reference.historyId);
 }
 
 test("resolves enabled setting precedence", () => {

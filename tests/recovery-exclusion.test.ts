@@ -254,5 +254,5 @@ test("live navigation notices ordinary work added in a mixed paging turn", async
 	await search.execute("first-call", { query: "Continue" }, undefined, undefined, ctx);
 	branch = [...branch, ...mixedEntries("search_history")];
 	const found = await search.execute("next-call", { query: "ordinary-result" }, undefined, undefined, ctx);
-	assert.deepEqual(found.details.references.map((reference: { historyId: string }) => reference.historyId), ["mixed"]);
+	assert.deepEqual(JSON.parse((found.content[0] as { text: string }).text).references.map((reference: { historyId: string }) => reference.historyId), ["mixed"]);
 });

@@ -63,9 +63,12 @@ async function execute(registeredTool: RegisteredTool, params: unknown) {
 	return registeredTool.execute("call-1", params, undefined, undefined, {} as ExtensionContext);
 }
 
-function details(result: { details?: unknown }): Record<string, unknown> {
-	assert.ok(result.details && typeof result.details === "object");
-	return result.details as Record<string, unknown>;
+/** Recovery replies keep their payload in content; details no longer copies it. */
+function payloadOf(result: { content: Array<{ type: string; text?: string }>; details?: unknown }): Record<string, unknown> {
+	assert.equal(result.details, undefined);
+	const block = result.content[0];
+	assert.ok(block.type === "text" && typeof block.text === "string");
+	return JSON.parse(block.text) as Record<string, unknown>;
 }
 
 type SerializedSchema = {
@@ -120,12 +123,9 @@ test("registers only the four strict recovery-tool schemas", () => {
 		type: "array",
 		items: { maxLength: 128, type: "string" },
 	});
-	assert.deepEqual(output.properties.limit, {
-		minimum: 1,
-		maximum: 2_000,
-		default: 2_000,
-		type: "integer",
-	});
+	const { description, ...limit } = output.properties.limit as Record<string, unknown>;
+	assert.deepEqual(limit, { minimum: 1, maximum: 16_384, type: "integer" });
+	assert.equal(typeof description, "string");
 });
 
 test("executes searches, browsing, and exact loads from one current snapshot", async () => {
@@ -135,13 +135,13 @@ test("executes searches, browsing, and exact loads from one current snapshot", a
 	const browse = tool(registration.tools, "browse_history");
 	const load = tool(registration.tools, "load_history");
 
-	assert.deepEqual(detailReferences(details(await execute(search, { query: "alpha" })))
+	assert.deepEqual(detailReferences(payloadOf(await execute(search, { query: "alpha" })))
 		.map((item: { historyId: string }) => item.historyId), ["u1", "u2", "u3"]);
-	assert.deepEqual(detailItems(details(await execute(search, { query: "alpha", load: true })))
+	assert.deepEqual(detailItems(payloadOf(await execute(search, { query: "alpha", load: true })))
 		.map((item: HistoryItem) => item.id), ["u1", "u2", "u3"]);
-	assert.deepEqual(detailReferences(details(await execute(browse, { direction: "forward", count: 2 })))
+	assert.deepEqual(detailReferences(payloadOf(await execute(browse, { direction: "forward", count: 2 })))
 		.map((item: { historyId: string }) => item.historyId), ["u1", "u2"]);
-	assert.deepEqual(detailItems(details(await execute(load, { historyIds: ["u3", "u1"] })))
+	assert.deepEqual(detailItems(payloadOf(await execute(load, { historyIds: ["u3", "u1"] })))
 		.map((item: HistoryItem) => item.id), ["u3", "u1"]);
 	await assert.rejects(() => execute(load, { historyIds: ["u1", "missing"] }), /Unknown history ID missing/);
 	assert.equal(registration.snapshotCount(), 5);
@@ -152,23 +152,20 @@ test("loaded searches expose every requested reference and let callers load a co
 	const { tools } = registered(items);
 	const search = tool(tools, "search_history");
 	const result = await execute(search, { query: "rollback", limit: 10, load: true });
-	const payload = details(result);
+	const payload = payloadOf(result);
 
 	assert.deepEqual(detailReferences(payload).map((reference) => reference.historyId),
 		["h0", "h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9"]);
 	assert.deepEqual(detailItems(payload).map((item) => item.id), ["h0", "h1", "h2"]);
 	assert.deepEqual(payload.unloadedHistoryIds, ["h3", "h4", "h5", "h6", "h7", "h8", "h9"]);
-	const block = result.content[0];
-	assert.ok(block.type === "text");
-	assert.deepEqual(JSON.parse(block.text), payload);
 
-	const correction = detailItems(details(await execute(tool(tools, "load_history"), { historyIds: ["h4"] })));
+	const correction = detailItems(payloadOf(await execute(tool(tools, "load_history"), { historyIds: ["h4"] })));
 	assert.deepEqual(correction, [items[4]]);
 });
 
 test("loaded searches explicitly report no unloaded results when every match fits", async () => {
 	const { tools } = registered([user("u1", 0, "alpha"), user("u2", 1, "alpha")]);
-	const payload = details(await execute(tool(tools, "search_history"), { query: "alpha", load: true }));
+	const payload = payloadOf(await execute(tool(tools, "search_history"), { query: "alpha", load: true }));
 
 	assert.deepEqual(detailReferences(payload).map((reference) => reference.historyId), ["u1", "u2"]);
 	assert.deepEqual(detailItems(payload).map((item) => item.id), ["u1", "u2"]);
@@ -179,7 +176,7 @@ test("returns no items when loading a search with no matches", async () => {
 	const { tools } = registered([user("u1", 0, "alpha")]);
 	const search = tool(tools, "search_history");
 
-	assert.deepEqual(details(await execute(search, { query: "missing", load: true })), {
+	assert.deepEqual(payloadOf(await execute(search, { query: "missing", load: true })), {
 		references: [], items: [], unloadedHistoryIds: [],
 	});
 });
@@ -201,36 +198,34 @@ test("defers oversized reference metadata and loads without losing the history I
 	] as const) {
 		const reply = await execute(registeredTool, params);
 		assert.ok(Buffer.byteLength(JSON.stringify(reply), "utf8") <= 16_384);
-		assert.equal(detailReferences(details(reply))[0].historyId, "large");
+		assert.equal(detailReferences(payloadOf(reply))[0].historyId, "large");
 	}
 	const loaded = await execute(load, { historyIds: ["large"] });
 	assert.ok(Buffer.byteLength(JSON.stringify(loaded), "utf8") <= 16_384);
-	assert.equal((details(loaded).items as any[])[0].deferred, true);
-	const page = details(await execute(tool(tools, "read_context_output"), { historyId: "large", part: "/metadata" }));
-	assert.ok(typeof page.text === "string" && page.text.includes("src/0-"));
+	const [whole] = payloadOf(loaded).items as any[];
+	assert.equal(whole.id, "large");
+	assert.equal(whole.metadata.files.length, 50);
+	const page = await execute(tool(tools, "read_context_output"), { historyId: "large", part: "/metadata" });
+	assert.equal(payloadOf(page).format, "json");
+	assert.ok(page.content[1].type === "text" && page.content[1].text.includes("src/0-"));
 });
 
-test("reads exact output pages repeatedly through nextOffset", async () => {
+test("reads exact output pages repeatedly through next handles", async () => {
 	const output = turn("turn-1", 0, "a".repeat(3_000));
 	const { tools } = registered([output]);
 	const read = tool(tools, "read_context_output");
 
-	const first = details(await execute(read, {
+	const first = payloadOf(await execute(read, {
 		historyId: "turn-1",
 		source: "assistant",
 		contentIndex: 0,
 		limit: 2_000,
 	}));
-	const second = details(await execute(read, {
-		historyId: "turn-1",
-		source: "assistant",
-		contentIndex: 0,
-		offset: first.nextOffset,
-		limit: 2_000,
-	}));
-	assert.equal(first.nextOffset, 2_000);
+	assert.deepEqual(first.next, { historyId: "turn-1", part: "/assistantMessage/content/0", offset: 2_000, limit: 2_000 });
+	const second = payloadOf(await execute(read, first.next));
 	assert.equal(second.offset, 2_000);
 	assert.equal(second.nextOffset, null);
+	assert.equal(second.next, undefined);
 });
 
 test("rejects disabled recovery tools before taking a snapshot", async () => {
@@ -252,5 +247,5 @@ test("describes recovery tools and repeated output reads", () => {
 	for (const name of ["search_history", "browse_history", "load_history", "read_context_output"]) {
 		assert.match(tool(tools, name).description, new RegExp(name));
 	}
-	assert.match(tool(tools, "read_context_output").description, /nextOffset.*repeat|repeat.*nextOffset/i);
+	assert.match(tool(tools, "read_context_output").description, /header has next/);
 });

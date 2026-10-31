@@ -57,21 +57,29 @@ It rejects omitted assistant slots and does not permit traversal into image data
 Paging-only turns and excluded calls and results remain unavailable.
 
 Image blocks become metadata with explicit attachment handles during text serialization.
-Text-only values retain their exact JSON representation.
-An explicit image read returns one native Pi image block. Its bytes never enter text or `details`.
+Text reads of strings and plain text blocks use the text itself. Other text-only values retain their exact JSON representation.
+An explicit image read returns one native Pi image block. Its bytes never enter text.
 The image attachment is exempt from the text limit. Normal provider image limits still apply.
 
 `recovery-response.ts` limits the complete serialized text result to 16,384 UTF-8 bytes.
-It counts `content`, `details`, metadata, and JSON escaping before return.
+It counts every text block, metadata, and JSON escaping before return.
+Replies leave `details` empty, because the model reads only `content` and a copy would halve the room.
 `recovery-loads.ts` reserves every requested ID and continuation before adding inline content.
-Public items at most 4,096 serialized bytes can remain whole if the shared reply budget permits.
-Larger items and items that do not fit return bounded part descriptions and explicit deferred markers.
+It then makes items whole from the smallest to the largest while the shared reply budget permits.
+Items with images and items that do not fit return bounded part descriptions and explicit deferred markers.
+A part description has a 4,096-byte limit.
 Oversized reference metadata is also deferred without dropping its history ID.
 Part lists have their own offsets and continuations when all descriptions do not fit.
 
 `output-pages.ts` supports public part handles and the original assistant and tool-result selectors.
-It returns exact JSON ranges of at most 2,000 requested UTF-16 code units, shortened for the reply byte limit.
-Page boundaries never split surrogate pairs. The cursor advances by the actual returned length.
+A text-mode reply has a JSON header block and an unescaped page block.
+The header names the resolved part, its `text` or `json` format, the offsets, and a `next` handle while text remains.
+A page fills the reply byte limit unless the optional `limit` is smaller.
+Page boundaries never split surrogate pairs. The search sizes only whole-character ends, because a lone surrogate costs more escaped bytes than its pair.
+The cursor advances by the actual returned length.
+The header repeats `historyId` and `part`, so they are limited to 128 and 512 characters. The page always has room for a body.
+Errors that list choices clip each choice and the whole list, so they stay far below the reply limit.
+Without `contentIndex` or `toolCallId`, the original selectors read the only matching public block or result. Otherwise the error lists the choices.
 The reader uses the same recovery view as navigation and rejects paging calls and results.
 Older paging replies can contain serialized private data.
 

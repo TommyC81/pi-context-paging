@@ -183,8 +183,6 @@ function noticeHeader(
 			historyId: toolReference.historyId,
 			source: "toolResult",
 			toolCallId: toolReference.toolCallId,
-			offset: 0,
-			limit: 2000,
 		})}).`);
 	}
 	return lines;

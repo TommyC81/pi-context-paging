@@ -36,7 +36,7 @@ const user: HistoryItem = {
 	userMessage: { role: "user", content: "request", timestamp: 3 } as any,
 };
 
-test("reads exact serialized output pages without replacing large values", () => {
+test("reads exact output pages without replacing large values", () => {
 	const first = readContextOutput([turn], {
 		historyId: turn.id,
 		source: "toolResult",
@@ -44,26 +44,31 @@ test("reads exact serialized output pages without replacing large values", () =>
 		limit: 2_000,
 	});
 
-	assert.equal(first.offset, 0);
-	assert.equal(first.text.length, 2_000);
-	assert.equal(first.nextOffset, 2_000);
+	assert.equal(first.header.offset, 0);
+	assert.equal(first.header.format, "json");
+	assert.equal(first.text, JSON.stringify(turn.toolResults[0]).slice(0, 2_000));
+	assert.equal(first.header.nextOffset, 2_000);
+	assert.deepEqual(first.header.next, { historyId: turn.id, part: "/toolResults/0", offset: 2_000, limit: 2_000 });
 
 	const final = readContextOutput([turn], {
 		historyId: turn.id,
 		source: "toolResult",
 		toolCallId: "call-1",
-		offset: first.totalCharacters,
+		offset: first.header.totalCharacters,
 	});
 	assert.equal(final.text, "");
-	assert.equal(final.nextOffset, null);
+	assert.equal(final.header.nextOffset, null);
+	assert.equal(final.header.next, undefined);
 
 	const assistant = readContextOutput([turn], {
 		historyId: turn.id,
 		source: "assistant",
 		contentIndex: 0,
 	});
-	assert.equal(assistant.text, JSON.stringify(turn.assistantMessage.content[0]).slice(0, 2_000));
-	assert.equal(assistant.nextOffset, 2_000);
+	assert.equal(assistant.header.format, "text");
+	assert.equal(assistant.text, assistantText.slice(0, assistant.text.length));
+	assert.ok(assistant.text.length > 15_000);
+	assert.equal(assistant.header.nextOffset, assistant.text.length);
 });
 
 test("rejects invalid context-output references and page bounds", () => {
@@ -84,14 +89,13 @@ test("rejects invalid context-output references and page bounds", () => {
 		{ ...assistantReference, historyId: user.id },
 		{ ...assistantReference, contentIndex: 1 },
 		{ ...resultReference, toolCallId: "missing" },
+		{ ...resultReference, toolCallId: "" },
 		{ ...assistantReference, toolCallId: "call-1" },
 		{ ...resultReference, contentIndex: 0 },
-		{ historyId: turn.id, source: "assistant" },
-		{ historyId: turn.id, source: "toolResult" },
 		{ ...assistantReference, offset: -1 },
 		{ ...assistantReference, offset: 0.5 },
 		{ ...assistantReference, limit: 0 },
-		{ ...assistantReference, limit: 2_001 },
+		{ ...assistantReference, limit: 16_385 },
 		{ ...resultReference, offset: serializedResult.length + 1 },
 	] as unknown[]) {
 		assert.throws(() => readContextOutput([turn, user], input as Parameters<typeof readContextOutput>[1]));

@@ -150,7 +150,7 @@ test("public recovery leaves raw history and ordinary tool results unchanged", (
 	assert.deepEqual(raw, before);
 });
 
-test("registered recovery tools exclude private data from content and details", async () => {
+test("registered recovery tools exclude private data from their replies", async () => {
 	const execute = registered([turn()]);
 	const cases: Array<[string, unknown]> = [
 		["search_history", { query: "parser" }],
@@ -164,7 +164,7 @@ test("registered recovery tools exclude private data from content and details", 
 	for (const [name, params] of cases) {
 		const result = await execute(name, params);
 		assertPublic(result.content);
-		assertPublic(result.details);
+		assert.equal(result.details, undefined);
 	}
 	for (const contentIndex of [0, 1, 5]) {
 		await assert.rejects(() => execute("read_context_output", {
@@ -181,21 +181,22 @@ test("output pages reject thinking, redacted thinking, and unknown assistant blo
 	}
 });
 
-test("output pages use original indices and exact public JSON across offsets", () => {
+test("output pages use original indices and exact public text or JSON across offsets", () => {
 	const raw = turn();
-	const expected = JSON.stringify({ type: "text", text: publicText });
 	let text = "";
 	let nextOffset: number | null = 0;
 	while (nextOffset !== null) {
 		const page = readContextOutput([raw], {
 			historyId: raw.id, source: "assistant", contentIndex: 2, offset: nextOffset, limit: 17,
 		});
-		assert.equal(page.totalCharacters, expected.length);
-		assert.equal(page.offset, text.length);
+		assert.equal(page.header.part, "/assistantMessage/content/2");
+		assert.equal(page.header.format, "text");
+		assert.equal(page.header.totalCharacters, publicText.length);
+		assert.equal(page.header.offset, text.length);
 		text += page.text;
-		nextOffset = page.nextOffset;
+		nextOffset = page.header.nextOffset;
 	}
-	assert.equal(text, expected);
+	assert.equal(text, publicText);
 
 	const callPage = readContextOutput([raw], { historyId: raw.id, source: "assistant", contentIndex: 3 });
 	assert.equal(callPage.text, JSON.stringify({

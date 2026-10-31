@@ -232,9 +232,10 @@ Use `load_history` to load those IDs, at most three per call.
 ### Reply limits and large items
 
 Every text reply has a 16 KiB limit, measured as serialized UTF-8 bytes.
-This limit includes `content`, `details`, metadata, and JSON escaping.
-An item stays whole only when its public body is at most 4 KiB and fits the shared reply budget.
-A large item does not prevent a later small item from loading.
+The limit covers the complete tool result, including metadata and JSON escaping.
+Replies put everything in `content` and leave `details` empty, so no copy uses up the limit.
+Requested items load whole, smallest first, while they fit the shared reply budget. The reply keeps the requested order.
+A large item does not prevent a smaller item from loading. Items with images stay deferred.
 
 A deferred item contains `id`, `kind`, `deferred: true`, and part descriptions with read handles.
 It also contains `totalParts`, `nextPartOffset`, and a `readParts` handle.
@@ -250,20 +251,34 @@ For example, this call reads a stored user string:
 {"historyId":"abc123","part":"/userMessage/content"}
 ```
 
-Default text mode returns exact JSON ranges, with `offset`, `nextOffset`, and `totalCharacters`.
+Default text mode returns two text blocks.
+The first block is a JSON header. For a 40,000-character user message, the first header is:
+
+```json
+{"historyId":"abc123","part":"/userMessage/content","format":"text","offset":0,"nextOffset":16092,"totalCharacters":40000,"next":{"historyId":"abc123","part":"/userMessage/content","offset":16092}}
+```
+
+The second block is the page itself, without JSON escaping. An empty page has no second block.
+The format is `text` for strings and for text blocks that have only `type` and `text`. Their pages contain the plain text.
+Other parts have the format `json`. Their pages contain exact JSON.
 Offsets count UTF-16 code units, as JavaScript string offsets do.
-Each page contains at most the requested `limit`, up to 2,000 code units.
-The byte limit can shorten a page. Pages never split a Unicode surrogate pair.
-If the next character needs two code units and `limit` is one, increase `limit`.
-Repeat with `nextOffset` to recover the full value without gaps.
+A page fills the byte limit unless `limit` is smaller. The largest `limit` is 16,384 code units.
+Pages never split a Unicode surrogate pair. If the next character needs two code units and `limit` is one, increase `limit`.
+Each header repeats `historyId` and `part`, so `historyId` can have at most 128 characters and `part` at most 512. Handles from the extension are much shorter.
+While text remains, the header has `next`, the exact arguments for the next read. Pass it unchanged to recover the full value without gaps.
+
 The older `source: "assistant"` and `source: "toolResult"` selectors still work.
+Without `contentIndex`, `source: "assistant"` reads the turn's only public text block. A turn without text blocks and with only one public block reads that block.
+Without `toolCallId`, `source: "toolResult"` reads the turn's only public tool result.
+In other cases, the error lists the public choices. An unknown part gives an error that lists the item's public parts.
+These lists shorten long values and omit choices past a size limit. Use `mode: "parts"` for the complete list.
 Do not combine these selectors with a `part` handle.
 
 ### Images
 
 Image parts contain metadata and a read handle with `mode: "image"`.
 Pass that handle to `read_context_output` to receive one native Pi image attachment.
-The image bytes do not enter text replies, search previews, or `details`.
+The image bytes do not enter text replies or search previews.
 Text reads of image-containing values return image metadata with attachment handles instead of base64.
 
 The 16 KiB limit applies to the image response's text and metadata, not its native attachment.

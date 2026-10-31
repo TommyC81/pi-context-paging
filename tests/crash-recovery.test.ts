@@ -55,8 +55,8 @@ function harness(manager = SessionManager.inMemory()) {
 		emit: async (name: string, event = {}) => await handlers.get(name)?.(event, ctx),
 		context: async () => await handlers.get("context")?.({ messages: manager.buildSessionProjection().messages }, ctx) as { messages: AgentMessage[] },
 		command: async (action: string) => await commands.get("context-paging").handler(action, ctx),
-		search: async () => (await tools.find((tool) => tool.name === "search_history")
-			.execute("search", { query: "INTERRUPTED_RECORD", failed: true, load: true }, undefined, undefined, ctx)).details,
+		search: async () => JSON.parse((await tools.find((tool) => tool.name === "search_history")
+			.execute("search", { query: "INTERRUPTED_RECORD", failed: true, load: true }, undefined, undefined, ctx)).content[0].text),
 	};
 }
 

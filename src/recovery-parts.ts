@@ -29,6 +29,39 @@ export function isRecoveryImage(value: unknown): value is ImageContent {
 
 const escapeKey = (key: string) => key.replace(/~/g, "~0").replace(/\//g, "~1");
 
+// Real tool call IDs reach 92 characters, so a clipped choice stays usable.
+const MAXIMUM_CHOICE_CHARACTERS = 160;
+const MAXIMUM_CHOICES_BYTES = 1_536;
+
+/** Shorten a value echoed in an error without splitting a surrogate pair. */
+export function clipValue(value: string): string {
+	if (value.length <= MAXIMUM_CHOICE_CHARACTERS) return value;
+	let end = MAXIMUM_CHOICE_CHARACTERS - 1;
+	if (/[\uD800-\uDBFF]/u.test(value[end - 1])) end--;
+	return `${value.slice(0, end)}…`;
+}
+
+/** Keep error messages small when an item has many or long parts or results. */
+export function listChoices(choices: readonly string[], limit = 20): string {
+	if (choices.length === 0) return "none";
+	const shown: string[] = [];
+	let bytes = 0;
+	for (const choice of choices.slice(0, limit)) {
+		const clipped = clipValue(choice);
+		bytes += Buffer.byteLength(JSON.stringify(clipped), "utf8");
+		if (bytes > MAXIMUM_CHOICES_BYTES) break;
+		shown.push(clipped);
+	}
+	const omitted = choices.length - shown.length;
+	return omitted > 0 ? `${shown.join(", ")}, and ${omitted} more` : shown.join(", ");
+}
+
+function unknownPart(item: RecoveryHistoryItem): Error {
+	const pointers = historyParts(item).map((part) => JSON.stringify(part.part));
+	return new Error(`Unknown public recovery part. Public parts: ${listChoices(pointers)}. `
+		+ "Use read_context_output with mode \"parts\" to list them with read handles.");
+}
+
 /** Select only own public fields; null assistant slots cannot be read around. */
 export function selectHistoryPart(item: RecoveryHistoryItem, pointer: string): unknown {
 	if (typeof pointer !== "string" || (pointer !== "" && !pointer.startsWith("/")) || /~(?![01])/u.test(pointer)) {
@@ -38,15 +71,20 @@ export function selectHistoryPart(item: RecoveryHistoryItem, pointer: string): u
 	for (const segment of pointer === "" ? [] : pointer.slice(1).split("/")) {
 		const key = segment.replace(/~1/g, "/").replace(/~0/g, "~");
 		if (isRecoveryImage(value)) throw new Error("Read image attachments through their image handles, not image fields.");
-		if (typeof value !== "object" || value === null || !Object.hasOwn(value, key)) {
-			throw new Error("Unknown public recovery part.");
-		}
+		if (typeof value !== "object" || value === null || !Object.hasOwn(value, key)) throw unknownPart(item);
 		value = (value as Record<string, unknown>)[key];
 	}
-	if (value === undefined || (value === null && /^\/assistantMessage\/content\/\d+$/u.test(pointer))) {
-		throw new Error("Unknown public recovery part.");
-	}
+	if (value === undefined || (value === null && /^\/assistantMessage\/content\/\d+$/u.test(pointer))) throw unknownPart(item);
 	return value;
+}
+
+/** Strings and plain text blocks read back as their text, without JSON escaping. */
+function plainText(value: unknown): string | undefined {
+	if (typeof value === "string") return value;
+	if (typeof value !== "object" || value === null) return undefined;
+	const block = value as Record<string, unknown>;
+	const keys = Object.keys(block);
+	return keys.length === 2 && block.type === "text" && typeof block.text === "string" ? block.text : undefined;
 }
 
 /** List content separately; the root handle also recovers headers and other public fields. */
@@ -97,13 +135,21 @@ export function serializeRecoveryPart(item: RecoveryHistoryItem, pointer: string
 	return text;
 }
 
+export type RecoveryPartText = { format: "text" | "json"; text: string };
+
+/** Text-mode pages slice this representation; every other part keeps its image-safe JSON. */
+export function recoveryPartText(item: RecoveryHistoryItem, pointer: string): RecoveryPartText {
+	const text = plainText(selectHistoryPart(item, pointer));
+	return text === undefined ? { format: "json", text: serializeRecoveryPart(item, pointer) } : { format: "text", text };
+}
+
 export function describeHistoryPart(item: RecoveryHistoryItem, part: HistoryPart): HistoryPartDescription {
 	if (isRecoveryImage(part.value)) {
 		const metadata = imageMetadata(part.value, item.id, part.part);
 		return { part: part.part, type: "image", bytes: metadata.bytes, read: metadata.read };
 	}
-	const text = serializeRecoveryPart(item, part.part);
-	const type = typeof part.value === "object" && part.value !== null && "type" in part.value
+	const { format, text } = recoveryPartText(item, part.part);
+	const type = format === "text" ? "text" : typeof part.value === "object" && part.value !== null && "type" in part.value
 		&& (part.value.type === "text" || part.value.type === "toolCall") ? part.value.type : "json";
 	return {
 		part: part.part,
