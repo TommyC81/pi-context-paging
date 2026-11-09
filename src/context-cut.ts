@@ -1,5 +1,6 @@
 import type { UserMessage } from "@earendil-works/pi-ai";
 import type { HistoryItem } from "./history.ts";
+import type { ConversationRecords } from "./paging-notice.ts";
 
 export type ContextCutKey = { readonly historyId: string; readonly toolCallId?: string };
 export type ContextCutFrontier =
@@ -9,7 +10,8 @@ export type ContextCutFallbackReason =
 	| "raw-history-unavailable" | "cut-key-unresolved"
 	| "keyless-no-key" | "keyless-snap-over-budget"
 	| "frontier-not-in-groups";
-export type ContextCutSnapshot = { readonly frontier: ContextCutFrontier; readonly notice: UserMessage };
+/** Plain evicted-conversation records at this boundary; kept structuredClone-safe for snapshot persistence. */
+export type ContextCutSnapshot = { readonly frontier: ContextCutFrontier; readonly notice: UserMessage; readonly conversation?: ConversationRecords };
 
 /** Raw provenance only; the selector separately resolves this frontier in its validated groups. */
 export function rawCutFrontierResolves(items: readonly HistoryItem[] | undefined, frontier: ContextCutFrontier): boolean {

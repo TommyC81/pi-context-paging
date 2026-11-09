@@ -60,6 +60,9 @@ const FILE_ARGUMENT_KEYS = new Set(["path", "file", "files", "filepath", "file_p
 
 type RelevantMessageEntry = Extract<SessionEntry, { type: "message" }>;
 
+/** A message entry paired with its index in the raw entry array, so projection watermarks address raw entries. */
+type RelevantEntry = { entry: RelevantMessageEntry; rawIndex: number };
+
 type ToolCallBlock = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 
 function isToolCallBlock(block: unknown): block is ToolCallBlock {
@@ -112,11 +115,16 @@ export function metadataFor(message: AssistantMessage, results: ToolResultMessag
 	};
 }
 
-function relevantEntries(entries: readonly SessionEntry[]): RelevantMessageEntry[] {
-	return entries.filter(
-		(entry): entry is RelevantMessageEntry => entry.type === "message"
-			&& (entry.message.role === "user" || entry.message.role === "assistant" || entry.message.role === "toolResult"),
-	);
+function relevantIndexed(entries: readonly SessionEntry[]): RelevantEntry[] {
+	const relevant: RelevantEntry[] = [];
+	for (let rawIndex = 0; rawIndex < entries.length; rawIndex++) {
+		const entry = entries[rawIndex]!;
+		if (entry.type === "message"
+			&& (entry.message.role === "user" || entry.message.role === "assistant" || entry.message.role === "toolResult")) {
+			relevant.push({ entry, rawIndex });
+		}
+	}
+	return relevant;
 }
 
 export type HistoryProjectionOptions = {
@@ -126,21 +134,32 @@ export type HistoryProjectionOptions = {
 	interruptedEntryIds?: ReadonlySet<string>;
 };
 
-/** Projects raw history without mutation; restore options retain otherwise incomplete saved exchanges. */
-export function projectActiveBranch(entries: readonly SessionEntry[], options: HistoryProjectionOptions = {}): HistoryItem[] {
-	const messages = relevantEntries(entries);
+/** Projection output plus, per pushed item, the raw entry index after the entries that item consumed. */
+type DetailedProjection = {
+	items: HistoryItem[];
+	throughEntryIndexes: number[];
+};
+
+function projectDetailed(
+	entries: readonly SessionEntry[],
+	options: HistoryProjectionOptions,
+	sequenceOffset = 0,
+): DetailedProjection {
+	const messages = relevantIndexed(entries);
 	const items: HistoryItem[] = [];
+	const throughEntryIndexes: number[] = [];
 
 	for (let index = 0; index < messages.length; index++) {
-		const entry = messages[index];
+		const { entry, rawIndex } = messages[index]!;
 		if (entry.message.role === "user") {
 			items.push({
 				id: entry.id,
 				kind: "user",
-				sequence: items.length,
+				sequence: items.length + sequenceOffset,
 				timestamp: entry.timestamp,
 				userMessage: entry.message,
 			});
+			throughEntryIndexes.push(rawIndex + 1);
 			continue;
 		}
 		if (entry.message.role === "toolResult") {
@@ -154,8 +173,8 @@ export function projectActiveBranch(entries: readonly SessionEntry[], options: H
 		const seenIds = new Set<string>();
 		const results: ToolResultMessage[] = [];
 		let resultIndex = index + 1;
-		while (resultIndex < messages.length && messages[resultIndex].message.role === "toolResult") {
-			const result = messages[resultIndex].message as ToolResultMessage;
+		while (resultIndex < messages.length && messages[resultIndex]!.entry.message.role === "toolResult") {
+			const result = messages[resultIndex]!.entry.message as ToolResultMessage;
 			if (!expectedIds.has(result.toolCallId)) {
 				throw new HistoryProjectionError("MISMATCHED_TOOL_RESULT");
 			}
@@ -178,17 +197,74 @@ export function projectActiveBranch(entries: readonly SessionEntry[], options: H
 		items.push({
 			id: entry.id,
 			kind: "modelTurn",
-			sequence: items.length,
+			sequence: items.length + sequenceOffset,
 			timestamp: entry.timestamp,
 			assistantMessage: assistant,
 			toolResults: results,
 			metadata: metadataFor(assistant, results, interruptedByRestore),
 			...(interruptedByRestore ? { interruptedByRestore: true as const } : {}),
 		});
+		throughEntryIndexes.push(messages[resultIndex - 1]!.rawIndex + 1);
 		index = resultIndex - 1;
 	}
 
-	return items;
+	return { items, throughEntryIndexes };
+}
+
+/** Projects raw history without mutation; restore options retain otherwise incomplete saved exchanges. */
+export function projectActiveBranch(entries: readonly SessionEntry[], options: HistoryProjectionOptions = {}): HistoryItem[] {
+	return projectDetailed(entries, options).items;
+}
+
+/** A reusable projection prefix: the items through a complete-item boundary, plus that boundary. */
+export type ProjectionWatermark = {
+	readonly items: readonly HistoryItem[];
+	/** Raw entry index of the first entry the items did not consume. */
+	readonly entryIndex: number;
+	/** Id of the last consumed raw entry at entryIndex - 1; undefined only when entryIndex is 0. */
+	readonly lastEntryId: string | undefined;
+};
+
+export type IncrementalProjection = { items: HistoryItem[]; watermark: ProjectionWatermark };
+
+function coldWatermark(detailed: DetailedProjection, entries: readonly SessionEntry[]): IncrementalProjection {
+	const entryIndex = detailed.throughEntryIndexes.length === 0
+		? 0
+		: detailed.throughEntryIndexes[detailed.throughEntryIndexes.length - 1]!;
+	return {
+		items: detailed.items,
+		watermark: { items: detailed.items, entryIndex, lastEntryId: entries[entryIndex - 1]?.id },
+	};
+}
+
+/** Projects with prefix reuse across refreshes; any watermark mismatch falls back to the full projection. */
+export function projectActiveBranchIncremental(
+	entries: readonly SessionEntry[],
+	previous?: ProjectionWatermark,
+	options: HistoryProjectionOptions = {},
+): IncrementalProjection {
+	if (!previous || options.recoverIncomplete || options.interruptedEntryIds) {
+		return coldWatermark(projectDetailed(entries, options), entries);
+	}
+	// Anchoring on the last consumed entry keeps appends incremental and still catches a branch switch.
+	const anchored = previous.entryIndex === 0
+		? previous.lastEntryId === undefined
+		: previous.entryIndex <= entries.length && entries[previous.entryIndex - 1]!.id === previous.lastEntryId;
+	if (!anchored) {
+		return coldWatermark(projectDetailed(entries, options), entries);
+	}
+	if (previous.entryIndex === entries.length) {
+		return { items: [...previous.items], watermark: previous };
+	}
+	const tail = projectDetailed(entries.slice(previous.entryIndex), options, previous.items.length);
+	const items = [...previous.items, ...tail.items];
+	const through = tail.throughEntryIndexes.length === 0
+		? previous.entryIndex
+		: previous.entryIndex + tail.throughEntryIndexes[tail.throughEntryIndexes.length - 1]!;
+	return {
+		items,
+		watermark: tail.items.length === 0 ? previous : { items, entryIndex: through, lastEntryId: entries[through - 1]?.id },
+	};
 }
 
 export function isPagingToolTurn(item: HistoryItem): boolean {

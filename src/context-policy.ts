@@ -9,7 +9,8 @@ import { SelectionHistoryLookup } from "./selection-history.ts";
 import { pagingToolCallIds } from "./recovery-content.ts";
 import { rawCutFrontierResolves, type ContextCutFrontier, type ContextCutSnapshot, type ContextCutFallbackReason } from "./context-cut.ts";
 import {
-	EvictedConversation, pagingNotice, pagingNoticeKey, protectedOverflowNotice, recoveryNotice, type ToolRecoveryReference,
+	EvictedConversation, pagingNotice, pagingNoticeKey, protectedOverflowNotice, recoveryNotice,
+	type ConversationRecords, type ToolRecoveryReference,
 } from "./paging-notice.ts";
 
 export { DEFAULT_CONTEXT_TOKEN_BUDGET } from "./settings.ts";
@@ -469,6 +470,7 @@ type FifoSelection = {
 	lastKeyed?: KeyedBoundary;
 	lastWasKeyless: boolean;
 	cutFailure?: ContextCutFallbackReason;
+	conversation?: ConversationRecords;
 };
 
 function selectionView(grouped: GroupedContext): SelectionView {
@@ -512,10 +514,11 @@ function unitFrontier(
 	return { failed: false };
 }
 
-function cutSnapshot(frontier: ContextCutFrontier, notice: UserMessage): ContextCutSnapshot {
+function cutSnapshot(frontier: ContextCutFrontier, notice: UserMessage, conversation?: ConversationRecords): ContextCutSnapshot {
 	return Object.freeze({
 		frontier: Object.freeze({ ...frontier, lastEvicted: Object.freeze({ ...frontier.lastEvicted }) }),
 		notice: Object.freeze({ ...notice }),
+		...(conversation ? { conversation: { ...conversation } } : {}),
 	});
 }
 
@@ -575,8 +578,13 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 		let cutFailure: ContextCutFallbackReason | undefined;
 		const protectedExchange = unreadTrailingExchange(view.grouped, history);
 		const protectedMessages = protectedExchange?.messages;
-		const conversation = new EvictedConversation(history);
-		for (const unit of earlierEvictedTurns(view)) conversation.addTurn(unit.messages);
+		const evictedBefore = earlierEvictedTurns(view);
+		const seeded = previous?.conversation?.evictedTurns === evictedBefore.length ? previous.conversation : undefined;
+		const conversation = seeded
+			? EvictedConversation.fromRecords(seeded, history)
+			: new EvictedConversation(history);
+		if (!seeded) for (const unit of evictedBefore) conversation.addTurn(unit.messages);
+		let lastKeyedConversationTurns = conversation.recordedTurns;
 		// The copied conversation may use only the room left once every evictable unit is gone,
 		// so it never turns a request that fits with the plain notice into an error. A remembered
 		// notice was sized for an earlier request, so it is resized before this request overflows.
@@ -586,8 +594,15 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 			const replacementDelta = replacement && protectedExchange
 				? unitEstimate(replacement.messages, cache) - unitEstimate(protectedExchange.messages, cache) : 0;
 			const estimate = retained + replacementDelta + (outgoingNotice ? messageEstimate(outgoingNotice, cache) : 0);
+			// Conversation records at the final keyed boundary; plain data, capped to the render horizon.
+			const conversationRecords = stateful
+				? count > 0
+					? conversation.recordsAt(lastKeyedConversationTurns)
+					: previous?.conversation
+				: undefined;
 			return { selection: { messages: viewMessages(view, count, outgoingNotice, replacement), estimatedTokens: reported(estimate), budgetTokens, mode, cutState: undefined },
-				normalNotice: notice, removedCount: count, lastKeyed, lastWasKeyless, cutFailure };
+				normalNotice: notice, removedCount: count, lastKeyed, lastWasKeyless, cutFailure,
+				...(conversationRecords ? { conversation: conversationRecords } : {}) };
 		};
 		if (calibrated(retained + noticeTokens) <= budgetTokens) return finish(previous ? "paged" : "within-budget");
 		if (view.grouped.activeTurn && calibrated(requestTokens(view)) > budgetTokens) {
@@ -634,7 +649,10 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 				const anchor = unitFrontier(unit, view, history, outgoing);
 				if (anchor.failed) cutFailure ??= "cut-key-unresolved";
 				lastWasKeyless = !anchor.frontier;
-				if (anchor.frontier) lastKeyed = { count, frontier: anchor.frontier, notice: notice!, rawEstimate: retained };
+				if (anchor.frontier) {
+					lastKeyed = { count, frontier: anchor.frontier, notice: notice!, rawEstimate: retained };
+					lastKeyedConversationTurns = conversation.recordedTurns;
+				}
 			}
 		}
 		return finish("paged");
@@ -657,16 +675,17 @@ export function selectContext(input: ContextSelectionInput): ContextSelection {
 	if (result.removedCount === 0) {
 		// Keep a resized notice so it stays stable until the cut advances.
 		const notice = result.normalNotice;
-		const cutState = remembered && notice && notice !== remembered.notice ? cutSnapshot(remembered.frontier, notice) : remembered;
+		const cutState = remembered && notice && notice !== remembered.notice
+			? cutSnapshot(remembered.frontier, notice, remembered.conversation) : remembered;
 		return { ...result.selection, cutState };
 	}
 	const boundary = result.lastKeyed;
 	if (!boundary) return fallback("keyless-no-key");
 	if (result.lastWasKeyless) {
 		if (calibrated(boundary.rawEstimate + messageEstimate(boundary.notice, cache)) > budgetTokens) return fallback("keyless-snap-over-budget");
-		const snapshot = boundary.count === 0 ? remembered! : cutSnapshot(boundary.frontier, boundary.notice);
+		const snapshot = boundary.count === 0 ? remembered! : cutSnapshot(boundary.frontier, boundary.notice, result.conversation);
 		return { messages: viewMessages(view, boundary.count, snapshot.notice), estimatedTokens: reported(boundary.rawEstimate + messageEstimate(snapshot.notice, cache)),
 			budgetTokens, mode: "paged", cutState: snapshot };
 	}
-	return { ...result.selection, cutState: cutSnapshot(boundary.frontier, boundary.notice) };
+	return { ...result.selection, cutState: cutSnapshot(boundary.frontier, boundary.notice, result.conversation) };
 }

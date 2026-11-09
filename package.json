@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "bench": "node --experimental-strip-types bench/context-policy.bench.ts",
+    "bench:caching": "node --experimental-strip-types bench/caching.bench.ts",
     "eval:recall": "node --experimental-strip-types scripts/recall-eval.ts",
     "check:package": "node scripts/smoke-packed-artifact.mjs",
     "check": "npm run typecheck && npm test && npm run check:package"

@@ -17,7 +17,19 @@ const MINIMUM_CLIPPED_CHARACTERS = 500;
 
 type ConversationEntry = { kind: "user message" | "assistant reply"; historyId: string; text: string; part: string };
 /** An entry from turn number `turn`, with its whole block formatted on first use. */
-type RecordedEntry = { entry: ConversationEntry; turn: number; whole?: string };
+export type RecordedEntry = { entry: ConversationEntry; turn: number; whole?: string };
+
+/** The most requests any notice section can render, so stored records stay bounded however far the cut advanced. */
+const MAXIMUM_STORED_REQUESTS = Math.ceil(SECTION_CHARACTERS / MINIMUM_CLIPPED_CHARACTERS);
+
+/** Plain conversation records carried in a cut snapshot; rebuilds into an EvictedConversation on reuse. */
+export type ConversationRecords = {
+	evictedTurns: number;
+	totalRequests: number;
+	longestId: string;
+	requests: RecordedEntry[];
+	replies: RecordedEntry[];
+};
 
 function requestEntry(message: UserMessage, historyId: string): ConversationEntry | undefined {
 	const text = typeof message.content === "string"
@@ -91,10 +103,39 @@ export class EvictedConversation {
 	private readonly replies: RecordedEntry[] = [];
 	private readonly history: ConversationProvenance;
 	private turnCount = 0;
+	private totalRequests = 0;
 	private longestId = "";
 
 	constructor(history: ConversationProvenance) {
 		this.history = history;
+	}
+
+	get recordedTurns(): number {
+		return this.turnCount;
+	}
+
+	/** Records at an earlier turn boundary; only plain data is kept, capped to the render horizon. */
+	recordsAt(count: number): ConversationRecords {
+		const through: RecordedEntry[] = [];
+		for (const recorded of this.requests) if (recorded.turn < count) through.push(recorded);
+		const replies = this.replies.filter((recorded) => recorded.turn < count);
+		const requests = through.length > MAXIMUM_STORED_REQUESTS ? through.slice(through.length - MAXIMUM_STORED_REQUESTS) : through;
+		let longestId = "";
+		for (const recorded of [...requests, ...replies]) {
+			if (recorded.entry.historyId.length > longestId.length) longestId = recorded.entry.historyId;
+		}
+		return { evictedTurns: count, totalRequests: through.length, longestId, requests, replies };
+	}
+
+	/** Shared record objects memoize their rendered block lazily; the memo is a deterministic idempotent string. */
+	static fromRecords(records: ConversationRecords, history: ConversationProvenance): EvictedConversation {
+		const rebuilt = new EvictedConversation(history);
+		rebuilt.requests.push(...records.requests);
+		rebuilt.replies.push(...records.replies);
+		rebuilt.turnCount = records.evictedTurns;
+		rebuilt.totalRequests = records.totalRequests;
+		rebuilt.longestId = records.longestId;
+		return rebuilt;
 	}
 
 	/** Records one fully evicted turn and reports whether it adds notice content. */
@@ -106,7 +147,10 @@ export class EvictedConversation {
 		const lastReply = lastPublicReply(messages);
 		const replyId = lastReply ? this.history.recoveryHistoryId(lastReply) : undefined;
 		const reply = lastReply && replyId !== undefined ? replyEntry(lastReply, replyId) : undefined;
-		if (request) this.requests.push({ entry: request, turn });
+		if (request) {
+			this.requests.push({ entry: request, turn });
+			this.totalRequests++;
+		}
 		if (reply) this.replies.push({ entry: reply, turn });
 		while (this.replies[0] && this.replies[0].turn < this.turnCount - RECENT_REPLY_TURNS) this.replies.shift();
 		for (const entry of [request, reply]) {
@@ -129,7 +173,7 @@ export class EvictedConversation {
 	sectionLines(maxCharacters: number): string[] {
 		// Reserve the heading, the longest omitted-count line, and the line breaks between them.
 		const blocks: string[] = [];
-		let room = maxCharacters - SECTION_HEADING.length - omittedLine(this.requests.length, this.longestId).length - 5;
+		let room = maxCharacters - SECTION_HEADING.length - omittedLine(this.totalRequests, this.longestId).length - 5;
 		let shownRequests = 0;
 		let oldestShown: ConversationEntry | undefined;
 		for (const recorded of this.newestFirst()) {
@@ -143,7 +187,7 @@ export class EvictedConversation {
 			if (block !== whole) break;
 		}
 		if (blocks.length === 0) return [];
-		const omitted = this.requests.length - shownRequests;
+		const omitted = this.totalRequests - shownRequests;
 		const lines = ["", SECTION_HEADING];
 		if (omitted > 0) lines.push(omittedLine(omitted, oldestShown?.historyId));
 		lines.push("", blocks.reverse().join("\n\n"));

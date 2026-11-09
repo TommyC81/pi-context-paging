@@ -1,6 +1,7 @@
 import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { calibrateResponse, type ContextTokenEstimates, type ResponseCalibration } from "./context-calibration.ts";
+import { MessageCostCache, type MessageKeyResolver } from "./context-costs.ts";
 
 type SnapshotMessage = {
 	message: AgentMessage;
@@ -59,6 +60,17 @@ export class ContextUsageTracker {
 	get tokenEstimates(): ContextTokenEstimates | undefined { return this.preparedTokenEstimates; }
 	private readonly fingerprints = new WeakMap<AgentMessage, string>();
 	private readonly estimates = new WeakMap<AgentMessage, number>();
+	private readonly costs: MessageCostCache | undefined;
+	private keyFor: MessageKeyResolver | undefined;
+
+	constructor(costs?: MessageCostCache) {
+		this.costs = costs;
+	}
+
+	/** Binds entry-derived cache keys for the current request's messages; call after refreshing raw items. */
+	bindKeys(resolver: MessageKeyResolver | undefined): void {
+		this.keyFor = resolver;
+	}
 
 	prepare(
 		messages: readonly AgentMessage[],
@@ -188,6 +200,8 @@ export class ContextUsageTracker {
 	}
 
 	private fingerprint(message: AgentMessage): string {
+		const key = this.keyFor?.(message);
+		if (this.costs) return this.costs.fingerprint(message, key, () => JSON.stringify(stableValue(message)));
 		const cached = this.fingerprints.get(message);
 		if (cached !== undefined) return cached;
 		const fingerprint = JSON.stringify(stableValue(message));
@@ -196,6 +210,8 @@ export class ContextUsageTracker {
 	}
 
 	private estimate(message: AgentMessage): number {
+		const key = this.keyFor?.(message);
+		if (this.costs) return this.costs.estimate(message, key, () => estimateTokens(message));
 		const cached = this.estimates.get(message);
 		if (cached !== undefined) return cached;
 		const estimate = estimateTokens(message);
